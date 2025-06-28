@@ -2,7 +2,7 @@ using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
-/// 走廊規劃器：負責房間間的直線連接、六角環形繞圈與亂線生成邏輯。
+/// 走廊規劃器：負責房間間的連接與符合指定流向的六角螺旋繞圈邏輯。
 /// </summary>
 public class HexCorridorPlanner
 {
@@ -16,142 +16,71 @@ public class HexCorridorPlanner
         new Vector2Int(1, -1)    // 330°
     };
 
-    public HexCorridorPlanner() { }
-
     /// <summary>
-    /// 直線連接房間中心，回傳每段走廊的格子座標列表。
+    /// 螺旋結果：包含走廊路徑與在路徑上隨機生成的房間中心點
     /// </summary>
-    public List<List<Vector2Int>> PlanCorridors(List<HexRoom> rooms)
+    public class SpiralResult
     {
-        var all = new List<List<Vector2Int>>();
-        for (int i = 0; i < rooms.Count - 1; i++)
-        {
-            var a = rooms[i].Center;
-            var b = rooms[i + 1].Center;
-            all.Add(GetStraightPath(a, b));
-        }
-        return all;
-    }
-
-    // 簡易的直線路徑（六方向最接近直線的連接）
-    private List<Vector2Int> GetStraightPath(Vector2Int start, Vector2Int end)
-    {
-        var path = new List<Vector2Int>();
-        var current = start;
-        while (current != end)
-        {
-            Vector2Int best = current;
-            float minDist = float.MaxValue;
-            foreach (var dir in DIRECTIONS)
-            {
-                var next = current + dir;
-                float d = (next - end).sqrMagnitude;
-                if (d < minDist)
-                {
-                    minDist = d;
-                    best = next;
-                }
-            }
-            current = best;
-            path.Add(current);
-        }
-        return path;
+        public List<Vector2Int> CorridorPath = new List<Vector2Int>();
+        public List<Vector2Int> RoomCenters = new List<Vector2Int>();
     }
 
     /// <summary>
-    /// 繞圈環路：從 origin 開始，按六方向，每邊走 lengthPerSide 步。
+    /// 嚴格按照順時鐘方向生成六邊形螺旋走廊。
+    /// 走每圈時依序從30°→90°→…→330°，每邊步數等於圈數。
+    /// 可在路徑上依機率插分支與房間。
     /// </summary>
-    public List<Vector2Int> GenerateLoop(Vector2Int origin, int lengthPerSide)
+    /// <param name="origin">起點（通常地圖中心）</param>
+    /// <param name="loops">圈數（螺旋最大半徑）</param>
+    /// <param name="branchProbability">分支機率 0~100</param>
+    /// <param name="roomProbability">房間插入機率 0~100</param>
+    /// <param name="seed">隨機種子（0 表示不固定）</param>
+    public SpiralResult GenerateOrderedSpiral(Vector2Int origin, int loops, int branchProbability, int roomProbability, int seed = 0)
     {
-        var path = new List<Vector2Int>();
-        var current = origin;
-        for (int i = 0; i < DIRECTIONS.Length; i++)
-        {
-            var dir = DIRECTIONS[i];
-            for (int step = 0; step < lengthPerSide; step++)
-            {
-                current += dir;
-                path.Add(current);
-            }
-        }
-        return path;
-    }
-
-    /// <summary>
-    /// 亂線環路：類似隨機漫步，保持在 maxRadius 範圍內。
-    /// </summary>
-    public List<Vector2Int> GenerateWindingLoop(Vector2Int origin, int steps, int maxRadius, int seed = 0)
-    {
-        var path = new List<Vector2Int>();
-        var current = origin;
-        var rng = seed != 0 ? new System.Random(seed) : new System.Random();
-        for (int i = 0; i < steps; i++)
-        {
-            var dir = DIRECTIONS[rng.Next(DIRECTIONS.Length)];
-            var next = current + dir;
-            if ((next - origin).sqrMagnitude > maxRadius * maxRadius)
-            {
-                // 超出範圍就反方向
-                next = current - dir;
-            }
-            current = next;
-            path.Add(current);
-        }
-        return path;
-    }
-
-    /// <summary>
-    /// 螺旋＆毛線結合：依序增加半徑生成「螺旋環圈」，並在過程中隨機分支與生成房間。
-    /// 返回螺旋走廊和房間中心列表。
-    /// </summary>
-    public SpiralResult GenerateSpiral(WindConfig config)
-    {
-        var rng = config.seed != 0 ? new System.Random(config.seed) : new System.Random();
         var result = new SpiralResult();
-        var current = config.origin;
-        for (int r = 1; r <= config.loops; r++)
+        var rng = seed != 0 ? new System.Random(seed) : new System.Random();
+        var current = origin;
+
+        // 逐圈生成：每圈邊長遞增
+        for (int r = 1; r <= loops; r++)
         {
-            // 每完成一個半徑 r 的環圈
-            for (int d = 0; d < DIRECTIONS.Length; d++)
+            // 六邊形六條邊，順序固定
+            for (int dirIndex = 0; dirIndex < DIRECTIONS.Length; dirIndex++)
             {
-                var dir = DIRECTIONS[d];
-                for (int i = 0; i < r; i++)
+                var dir = DIRECTIONS[dirIndex];
+                for (int step = 0; step < r; step++)
                 {
                     current += dir;
-                    result.Corridors.Add(current);
+                    result.CorridorPath.Add(current);
 
-                    // 隨機生成分支
-                    if (rng.Next(100) < config.branchChance)
+                    // 隨機分支短線（相同方向 r/2 步左右）
+                    if (rng.Next(100) < branchProbability)
                     {
-                        var branch = GenerateWindingLoop(current, rng.Next(1, r + 1), r / 2, rng.Next());
-                        result.Corridors.AddRange(branch);
+                        int branchLen = Mathf.Max(1, r / 2);
+                        var branch = GenerateOrderedBranch(current, branchLen, rng);
+                        result.CorridorPath.AddRange(branch);
                     }
-                    // 隨機生成房間
-                    if (rng.Next(100) < config.roomChance)
-                    {
+                    // 隨機插房間
+                    if (rng.Next(100) < roomProbability)
                         result.RoomCenters.Add(current);
-                    }
                 }
             }
         }
+
         return result;
     }
 
-    /// <summary>
-    /// 配置參數：螺旋圈數、分支機率、房間機率等。
-    /// </summary>
-    public class WindConfig
+    // 私有：在當前方向上產生一段短分支，方向隨機選自六方向
+    private List<Vector2Int> GenerateOrderedBranch(Vector2Int origin, int length, System.Random rng)
     {
-        public Vector2Int origin;
-        public int loops;
-        public int branchChance;    // 0~100
-        public int roomChance;      // 0~100
-        public int seed;
-    }
-
-    public class SpiralResult
-    {
-        public List<Vector2Int> Corridors = new List<Vector2Int>();
-        public List<Vector2Int> RoomCenters = new List<Vector2Int>();
+        var path = new List<Vector2Int>();
+        var current = origin;
+        var dir = DIRECTIONS[rng.Next(DIRECTIONS.Length)];
+        for (int i = 0; i < length; i++)
+        {
+            current += dir;
+            path.Add(current);
+        }
+        return path;
     }
 }
